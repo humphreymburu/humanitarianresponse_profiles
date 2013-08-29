@@ -1,0 +1,143 @@
+<?php
+/**
+ * @file
+ * Code for the humanitarianresponse profiles feature.
+ */
+
+include_once('humanitarianresponse_profiles.features.inc');
+
+/**
+ * Implements hook_field_attach_view_alter().
+ *
+ * Show titles of empty fields.
+ */
+function humanitarianresponse_profiles_field_attach_view_alter(&$output, $context) {
+  $entity = $context['entity'];
+  // We proceed only on nodes.
+  if ($context['entity_type'] != 'field_collection_item' || $context['view_mode'] != 'full' || !in_array($entity->field_name, array('field_humprofile_casualties', 'field_humprofile_displaced', 'field_humprofile_non_displaced'))) {
+    return;
+  }
+
+  // Load all instances of the fields for the node.
+  $instances = _field_invoke_get_instances('field_collection_item', $entity->field_name, array('default' => TRUE, 'deleted' => FALSE));
+ 
+  foreach ($instances as $field_name => $instance) {
+    // Set content for fields they are empty.
+    if (empty($entity->{$field_name})) {
+      $display = field_get_display($instance, 'full', $entity);
+      // Do not add field that is hidden in current display.
+      if ($display['type'] == 'hidden') {
+        continue;
+      }
+      // Load field settings.
+      $field = field_info_field($field_name);
+      // Set output for field.
+      $output[$field_name] = array(
+        '#theme' => 'field',
+        '#title' => $instance['label'],
+        '#label_display' => 'inline',
+        '#field_type' => $field['type'],
+        '#field_name' => $field_name,
+        '#bundle' => $entity->field_name,
+        '#object' => $entity,
+        '#items' => array(0 => array('value' => '0')),
+        '#entity_type' => 'field_collection_item',
+        '#weight' => $display['weight'],
+        0 => array('#markup' => t('No data')),
+      );
+    }
+  }
+}
+
+function humanitarianresponse_profiles_menu() {
+  $items['visuals-data/humanitarian-profile/geojson'] = array(
+    'page callback' => 'humanitarianresponse_profiles_geojson',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'drupal_json_output',
+  );
+  return $items;
+}
+
+function humanitarianresponse_profiles_geojson() {
+  geophp_load();
+  $query = new EntityFieldQuery();
+  
+  $result = $query
+    ->entityCondition('entity_type', 'node')
+    ->entityCondition('bundle', 'humanitarian_profile')
+    ->propertyCondition('status', '1')
+    ->execute();
+  
+  if (isset($result['node'])) {
+    $nids = array_keys($result['node']);
+    $nodes = entity_load('node', $nids);
+    
+    $latest = array();
+    
+    // Order nodes by location tid
+    foreach ($nodes as $node) {
+      $loc_tid = $node->field_locations[LANGUAGE_NONE][0]['tid'];
+      if (!isset($latest[$loc_tid])) {
+        $latest[$loc_tid] = $node;
+      }
+      else {
+        $date_max = strtotime($latest[$loc_tid]->field_humprofile_date[LANGUAGE_NONE][0]['value']);
+        $date = strtotime($node->field_humprofile_date[LANGUAGE_NONE][0]['value']);
+        if ($date > $date_max) {
+          $latest[$loc_tid] = $node;
+        }
+      }
+    }
+        
+    
+    $return = array(
+      'type' => 'FeatureCollection',
+    );
+    
+    // Get max idps
+    $idps_array = array();
+    foreach ($latest as $node) {
+      $displaced_id = $node->field_humprofile_displaced[LANGUAGE_NONE][0]['value'];
+      $displaced = entity_load('field_collection_item', array($displaced_id));
+      $idps = $displaced[$displaced_id]->field_humprofile_idp[LANGUAGE_NONE][0]['value'];
+      $idps_array[] = $idps;
+    }
+    
+    $max = max($idps_array);
+    $divider = $max / 15;
+    
+    foreach ($latest as $node) {
+      $location = taxonomy_term_load($node->field_locations[LANGUAGE_NONE][0]['tid']);
+      $date = $node->field_humprofile_date;
+      $polygon = geoPHP::load($location->field_location[LANGUAGE_NONE][0]['wkt'], 'wkt');
+      if (isset($polygon)) {
+        $centroid = $polygon->getCentroid();
+        $centroid_json = $centroid->out('json');
+      }
+      
+      $displaced_id = $node->field_humprofile_displaced[LANGUAGE_NONE][0]['value'];
+      $displaced = entity_load('field_collection_item', array($displaced_id));
+      $idps = $displaced[$displaced_id]->field_humprofile_idp[LANGUAGE_NONE][0]['value'];
+      $feature = array(
+        'type' => 'Feature',
+        'geometry' => isset($centroid_json) ? drupal_json_decode($centroid_json) : '',
+        'properties' => array(
+          'name' => $location->name,
+          'description' => $idps.' IDPs',
+          'date' => $date[LANGUAGE_NONE][0]['value'],
+          'idps' => $idps,
+          'radius' => intval($idps / $divider),
+        )
+      );
+      $features[] = $feature;
+    }
+    
+    $return['features'] = $features;
+    
+    return $return;
+  }
+}
+
+  
+  
